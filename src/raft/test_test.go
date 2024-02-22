@@ -8,12 +8,18 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"runtime"
+	"testing"
+)
 import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+import _ "net/http/pprof"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -51,6 +57,11 @@ func TestInitialElection3A(t *testing.T) {
 }
 
 func TestReElection3A(t *testing.T) {
+	go func() {
+		runtime.SetBlockProfileRate(1)     // 开启对阻塞操作的跟踪，block
+		runtime.SetMutexProfileFraction(1) // 开启对锁调用的跟踪，mutex
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -61,31 +72,41 @@ func TestReElection3A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+	CPrintf("old leader disconnect\n")
 	cfg.checkOneLeader()
+	CPrintf("new leader elected\n")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
 	cfg.connect(leader1)
+	CPrintf("old leader connect\n")
 	leader2 := cfg.checkOneLeader()
+	CPrintf("no influence\n")
 
 	// if there's no quorum, no new leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	CPrintf("disconnect 2 node\n")
 	time.Sleep(2 * RaftElectionTimeout)
 
 	// check that the one connected server
 	// does not think it is the leader.
 	cfg.checkNoLeader()
+	CPrintf("no leader elected\n")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
+	CPrintf("one node connect\n")
 	cfg.checkOneLeader()
+	CPrintf("new leader elected\n")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
+	CPrintf("another node connect\n")
 	cfg.checkOneLeader()
+	CPrintf("remain one leader\n")
 
 	cfg.end()
 }

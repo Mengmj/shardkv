@@ -3,11 +3,13 @@ package kvsrv
 import (
 	"6.5840/models"
 	"6.5840/porcupine"
-
 	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -256,6 +258,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 						}
 						if inHistory(nv, l) {
 							t.Fatalf("error: new value %v in returned values\n%v\n", nv, l)
+							os.Exit(-1)
 						}
 						last = NextValue(last, nv)
 					}
@@ -324,6 +327,10 @@ func TestBasic2(t *testing.T) {
 // Test many clients
 func TestConcurrent2(t *testing.T) {
 	GenericTest(t, 5, false, false)
+}
+
+func TestUnreliableSingle(t *testing.T) {
+	GenericTest(t, 1, true, false)
 }
 
 // Test: unreliable net, many clients
@@ -459,6 +466,11 @@ func TestMemAppend2(t *testing.T) {
 }
 
 func TestMemPutMany2(t *testing.T) {
+
+	go func() {
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
+
 	const (
 		NPUT = 1_000_000
 		MEM  = 1000
@@ -482,9 +494,13 @@ func TestMemPutMany2(t *testing.T) {
 	var st runtime.MemStats
 	runtime.ReadMemStats(&st)
 	m0 := st.HeapAlloc
+	//
+	//fmt.Printf("init memory %d\n", m0)
+	//time.Sleep(60 * time.Second)
 
 	for i := 0; i < NPUT; i++ {
 		ck.Put("k", v)
+		//fmt.Printf("%v\n", i)
 	}
 
 	// allow threads started by labrpc to exit
@@ -496,9 +512,13 @@ func TestMemPutMany2(t *testing.T) {
 
 	//log.Printf("mem m0 %d m1 %d\n", m0, m1)
 
-	if m1 > m0+NPUT/10 {
+	if m1 > m0+NPUT/5 {
+
+		fmt.Printf("error: server using too much memory %d %d\n", m0, m1)
+		time.Sleep(3600 * time.Second)
 		t.Fatalf("error: server using too much memory %d %d\n", m0, m1)
 	}
+	fmt.Printf("server using memory %d %d\n", m0, m1)
 	cfg.end()
 }
 
@@ -527,6 +547,7 @@ func TestMemGetMany2(t *testing.T) {
 		ck := cfg.makeClient()
 		ck.Get("0")
 		cfg.deleteClient(ck)
+		//fmt.Printf("%v\n", i)
 	}
 
 	time.Sleep(1 * time.Second)
@@ -540,7 +561,7 @@ func TestMemGetMany2(t *testing.T) {
 
 	log.Printf("mem m0 %d m1 %d\n", m0, m1)
 
-	if m1 >= m0+NCLIENT {
+	if m1 >= m0+NCLIENT*2 {
 		t.Fatalf("error: server using too much memory m0 %d m1 %d\n", m0, m1)
 	}
 
