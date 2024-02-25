@@ -13,11 +13,11 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"sync/atomic"
 	"testing"
 )
 import "time"
 import "math/rand"
-import "sync/atomic"
 import "sync"
 import _ "net/http/pprof"
 
@@ -708,6 +708,7 @@ func TestPersist13C(t *testing.T) {
 	cfg.begin("Test (3C): basic persistence")
 
 	cfg.one(11, servers, true)
+	CPrintf("agree on cmd %v", 11)
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
@@ -719,6 +720,7 @@ func TestPersist13C(t *testing.T) {
 	}
 
 	cfg.one(12, servers, true)
+	CPrintf("agree on cmd %v", 12)
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -726,12 +728,15 @@ func TestPersist13C(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(13, servers, true)
+	CPrintf("agree on cmd %v", 13)
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+	CPrintf("leader %v disconnect", leader2)
 	cfg.one(14, servers-1, true)
 	cfg.start1(leader2, cfg.applier)
 	cfg.connect(leader2)
+	CPrintf("server %v start and join", leader2)
 
 	cfg.wait(4, servers, -1) // wait for leader2 to join before killing i3
 
@@ -861,6 +866,7 @@ func TestFigure83C(t *testing.T) {
 
 		if leader != -1 {
 			cfg.crash1(leader)
+			CPrintf("leader %v crash", leader)
 			nup -= 1
 		}
 
@@ -870,6 +876,7 @@ func TestFigure83C(t *testing.T) {
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
 				nup += 1
+				CPrintf("server %v start and reconnect", s)
 			}
 		}
 	}
@@ -878,6 +885,7 @@ func TestFigure83C(t *testing.T) {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
+			CPrintf("server %v start and reconnect", i)
 		}
 	}
 
@@ -947,6 +955,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
+			CPrintf("disconnect leader %v", leader)
 			nup -= 1
 		}
 
@@ -954,6 +963,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
+				CPrintf("reconnect server %v", s)
 				nup += 1
 			}
 		}
@@ -964,8 +974,10 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
-	cfg.one(rand.Int()%10000, servers, true)
+	CPrintf("reconnect all servers")
+	lastCommand := rand.Int() % 10000
+	CPrintf("try agree on last command %v", lastCommand)
+	cfg.one(lastCommand, servers, true)
 
 	cfg.end()
 }

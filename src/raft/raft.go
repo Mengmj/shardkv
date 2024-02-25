@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	"fmt"
 	//	"bytes"
 	"math/rand"
@@ -77,13 +79,15 @@ type Raft struct {
 	applyCh       chan ApplyMsg
 	commitIndex   int64
 	lastApplied   int64
-	lastLogIndex  int64
-	lastLogTerm   int64
 
 	// for leader
-	nextIndex          []int64
-	matchIndex         []int64
-	appendRequestChans []chan *appendRequest
+	nextIndex  []int64
+	matchIndex []int64
+	//appendRequestChans []chan *appendRequest
+
+	// for bebug
+	lastLock int64
+	holder   string
 }
 
 // return currentTerm and whether this server
@@ -157,6 +161,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.log)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -177,6 +188,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&rf.currentTerm) != nil {
+		panic("error when decode rf.currentTerm")
+	}
+	if d.Decode(&rf.voteFor) != nil {
+		panic("error when decode rf.voteFor")
+	}
+	if d.Decode(&rf.log) != nil {
+		panic("error when decode rf.log")
+	}
+	FPrintf("readPersist", "read server state:\n%v", rf.Info())
 }
 
 // the service says it has created a snapshot that has
@@ -211,21 +234,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	grant := false
+	stateChange := false
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.leaderId = -1
 		rf.voteFor = -1
+		stateChange = true
 	}
 	if args.Term == rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.leaderId = -1
 		grant = (rf.voteFor == -1 || rf.voteFor == args.CandidateId)
 
 		// 检查candidate的log信息
-		if args.LastLogTerm < rf.lastLogTerm {
+		lastTerm, lastIndex := rf.lastLogTermAndIndex()
+		if args.LastLogTerm < lastTerm {
 			grant = false
-		} else if args.LastLogTerm == rf.lastLogTerm {
-			if args.LastLogIndex < rf.lastLogIndex {
+		} else if args.LastLogTerm == lastTerm {
+			if args.LastLogIndex < lastIndex {
 				grant = false
 			}
 		}
@@ -233,11 +257,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if grant {
 		rf.lastHeartBeat = time.Now().UnixMilli()
 		rf.voteFor = args.CandidateId
-		//DPrintf("node %v vote args: %v\n", rf.me, args)
-		//DPrintf("node info:\n%v", rf.Info())
+		FPrintf("RequestVote", "node %v vote args: %v\n", rf.me, args)
+		FPrintf("RequestVote", "node info:\n%v", rf.Info())
+		stateChange = true
+	} else {
+		FPrintf("RequestVote", "server %v refuse vote args: %v\n", rf.me, args)
+		FPrintf("RequestVote", "node info:\n%v", rf.Info())
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = grant
+	if stateChange {
+		rf.persist()
+	}
 	rf.mu.Unlock()
 }
 
@@ -297,17 +328,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 	if isLeader {
 		rf.mu.Lock()
-		rf.lastLogIndex++
-		rf.lastLogTerm = rf.currentTerm
+		_, lastIndex := rf.lastLogTermAndIndex()
 		entry := LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
-			Index:   rf.lastLogIndex,
+			Index:   lastIndex + 1,
 		}
 		rf.log = append(rf.log, entry)
-		index = int(rf.lastLogIndex)
-		term = int(rf.currentTerm)
+		index = int(entry.Index)
+		term = int(entry.Term)
 		//rf.trigerBroadcast(rf.appendRequestChans, true)
+		rf.persist()
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -349,8 +380,10 @@ func (rf *Raft) ticker() {
 		currentTerm := rf.currentTerm
 		lastHeartBeat := rf.lastHeartBeat
 		rf.mu.Unlock()
-		if !isLeader && time.Now().UnixMilli()-lastHeartBeat > 150+rand.Int63()%500 {
+		now := time.Now().UnixMilli()
+		if !isLeader && now-lastHeartBeat > 400 {
 			go rf.runElection(currentTerm + 1)
+			FPrintf("ticker", "server %v start a election for term %v now: %v lastHeart %v\n", rf.me, currentTerm+1, now, lastHeartBeat)
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -370,8 +403,8 @@ func (rf *Raft) runElection(electingTerm int64) {
 	rf.currentTerm = electingTerm
 	rf.voteFor = rf.me
 	rf.lastHeartBeat = time.Now().UnixMilli()
-	lastLogTerm := rf.lastLogTerm
-	lastLogIndex := rf.lastLogIndex
+	lastLogTerm, lastLogIndex := rf.lastLogTermAndIndex()
+	rf.persist()
 	rf.mu.Unlock()
 
 	replyChan := make(chan *RequestVoteReply)
@@ -410,6 +443,7 @@ func (rf *Raft) runElection(electingTerm int64) {
 		}
 	}
 	if vote > rf.n/2 {
+		FPrintf("runElection", "server %v get %v votes for term %v\n", rf.me, vote, electingTerm)
 		rf.takeOffice(electingTerm)
 	}
 }
@@ -419,6 +453,8 @@ func (rf *Raft) handleHigherTerm(term int64) bool {
 	if term > rf.currentTerm {
 		rf.leaderId = -1
 		rf.currentTerm = term
+		rf.voteFor = -1
+		rf.persist()
 		return true
 	} else {
 		return false
@@ -428,10 +464,10 @@ func (rf *Raft) handleHigherTerm(term int64) bool {
 type AppendEntriesArgs struct {
 	Term         int64
 	LeaderId     int
-	Entries      []LogEntry
 	PrevLogIndex int64
 	PrevLogTerm  int64
 	LeaderCommit int64
+	Entries      []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -444,13 +480,13 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
+	rf.lock("AppendEntries")
 	if args.Term < rf.currentTerm {
 		// 过期的请求,不处理
 		reply.Term = rf.currentTerm
 		reply.LeaderId = rf.leaderId
 		reply.Success = false
-		rf.mu.Unlock()
+		rf.unlock()
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -459,9 +495,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.leaderId = args.LeaderId
 			rf.currentTerm = args.Term
+			rf.voteFor = -1
+			rf.persist()
 		}
 	}
 	rf.lastHeartBeat = time.Now().UnixMilli()
+	FPrintf("AppendEntries", "server %v heard from leader %v at %v\n", rf.me, args.LeaderId, rf.lastHeartBeat)
 
 	//处理AppendEntries请求
 	prevLogPos := rf.findLogPosByIndex(args.PrevLogIndex)
@@ -485,14 +524,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 				if j != len(args.Entries) {
 					rf.log = append(rf.log[:i], args.Entries[j:]...)
+					rf.persist()
 				}
 				lastNewLog := args.Entries[len(args.Entries)-1]
 				lastMatchIndex = lastNewLog.Index
-				rf.lastLogTerm = max(lastNewLog.Term, rf.lastLogTerm)
-				rf.lastLogIndex = max(lastNewLog.Index, rf.lastLogIndex)
 			}
 			if args.LeaderCommit > rf.commitIndex {
+				oldCommmit := rf.commitIndex
 				rf.commitIndex = min(args.LeaderCommit, max(rf.commitIndex, lastMatchIndex))
+				if rf.commitIndex > oldCommmit {
+					FPrintf("AppendEntries", "server %v commit [%v...%v]\n", rf.me, oldCommmit+1, rf.commitIndex)
+				}
 			}
 			reply.Success = true
 		}
@@ -502,10 +544,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// debug
 	if reply.Success {
-		DPrintf("server %v accept append %v\n", rf.me, args)
-		DPrintf("server info:\n %v", rf.Info())
+		FPrintf("AppendEntries", "server %v accept append %v\n", rf.me, args)
+		FPrintf("AppendEntries", "server info:\n %v", rf.Info())
+	} else {
+		FPrintf("AppendEntries", "server %v reject append %v\n", rf.me, args)
+		FPrintf("AppendEntries", "server info:\n %v", rf.Info())
 	}
-	rf.mu.Unlock()
+	rf.unlock()
 }
 
 func (rf *Raft) firstGreaterIndex(term int64) int64 {
@@ -537,25 +582,25 @@ func (rf *Raft) lastLessIndex(term int64) int64 {
 // 调用前不能持有锁
 func (rf *Raft) takeOffice(term int64) {
 	rf.mu.Lock()
+	_, lastLogIndex := rf.lastLogTermAndIndex()
 	if term == rf.currentTerm {
 		rf.leaderId = rf.me
 		for i := 0; i < rf.n; i++ {
 			if i != rf.me {
-				rf.nextIndex[i] = rf.lastLogIndex + 1
+				rf.nextIndex[i] = lastLogIndex + 1
 				rf.matchIndex[i] = 0
-				requestChan := make(chan *appendRequest, 100)
-				rf.appendRequestChans[i] = requestChan
-				go rf.sendAppendEntries(rf.currentTerm, rf.appendRequestChans[i])
+				//requestChan := make(chan *appendRequest, 100)
+				//rf.appendRequestChans[i] = requestChan
+				//go rf.sendAppendEntries(rf.currentTerm, rf.appendRequestChans[i])
 			}
 			// TODO 其他初始化工作
 		}
-		//向其他节点发送一条AppendEntries抑制其他节点举行选举
-		rf.trigerBroadcast(rf.appendRequestChans, true)
+		rf.trigerBroadcast(true)
 		// 启动心跳协程
-		go rf.heartBeat(rf.currentTerm, rf.appendRequestChans)
-		DPrintf("node %v become leader of term %v", rf.me, rf.currentTerm)
+		go rf.heartBeat(rf.currentTerm)
+		FPrintf("takeOffice", "node %v become leader of term %v", rf.me, rf.currentTerm)
+		FPrintf("takeOffice", "leader Info:\n%v", rf.Info())
 	}
-	DPrintf("leader Info:\n%v", rf.Info())
 	rf.mu.Unlock()
 }
 
@@ -578,6 +623,7 @@ func (rf *Raft) apply() {
 		rf.mu.Unlock()
 		for _, msg := range msgs {
 			rf.applyCh <- msg
+			FPrintf("apply", "server %v commit %v\n", rf.me, msg)
 		}
 		endTime := time.Now().UnixMilli()
 		ms := max(0, 100-(endTime-startTime))
@@ -596,57 +642,56 @@ type appendRequest struct {
 	reply  *AppendEntriesReply
 }
 
-// 在workingTerm内持续向某节点发送AppendEntries请求,顺序发送接收,但是requestChan中的请求不保证顺序性
-func (rf *Raft) sendAppendEntries(workingTerm int64, requestChan chan *appendRequest) {
-	for request := range requestChan {
-		if request.target == -1 {
-			// 接收到关闭请求
+// 向peer发送AppendRequest,收到成功的回复返回或过期返回
+func (rf *Raft) sendAppendRequest(workingTerm int64, peer int) {
+	rf.lock("sendAppendRequest")
+	request := rf.buildAppendRequest(peer)
+	rf.unlock()
+	ok := false
+	success := false
+	exit := false
+	for rf.leaderTerm() == workingTerm && (!ok || !success) {
+		if ok {
+			reply := request.reply
+			rf.lock("sendAppendRequest")
+			if reply.Term > rf.currentTerm {
+				rf.handOver(reply.Term, reply.LeaderId)
+				exit = true
+			} else if reply.Term < rf.currentTerm {
+				// 由于workingTerm <= reply.Term, reply.Term < rf.currentTerm说明该节点已进入新term,该请求已过期, 忽略
+			} else {
+				target := request.target
+				if reply.XTerm > 0 {
+					lastIndex := rf.lastLessIndex(reply.XTerm)
+					if rf.log[lastIndex].Term == reply.XTerm {
+						rf.nextIndex[target] = lastIndex
+					} else {
+						rf.nextIndex[target] = reply.XIndex
+					}
+				} else {
+					rf.nextIndex[target] = reply.XLen
+				}
+				request = rf.buildAppendRequest(target)
+			}
+			rf.unlock()
+		}
+		if exit {
 			return
 		}
-		ok := false
-		success := false
-		// 发现term改变时设置退出
-		exit := false
-		for rf.leaderTerm() == workingTerm && (!ok || !success) { // 节点term更改可以打断重试
-			if ok {
-				reply := request.reply
-				rf.mu.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.handOver(reply.Term, reply.LeaderId)
-					exit = true
-				} else if reply.Term < rf.currentTerm {
-					// 由于workingTerm <= reply.Term, reply.Term < rf.currentTerm说明该节点已进入新term,该请求已过期, 忽略
-				} else {
-					target := request.target
-					if reply.XTerm > 0 {
-						lastIndex := rf.lastLessIndex(reply.XTerm)
-						if rf.log[lastIndex].Term == reply.XTerm {
-							rf.nextIndex[target] = lastIndex
-						} else {
-							rf.nextIndex[target] = reply.XIndex
-						}
-					} else {
-						rf.nextIndex[target] = reply.XLen
-					}
-					newRequest := rf.buildAppendRequest(target)
-					request = &newRequest
-				}
-
-				rf.mu.Unlock()
-			}
-			if exit {
-				return
-			}
-			ok = rf.peers[request.target].Call("Raft.AppendEntries", request.args, request.reply)
-			if ok {
-				success = request.reply.Success
-			}
+		FPrintf("sendAppendRequest", "server %v try to send appendRequest to server %v args: %v \n", rf.me, request.target, request.args)
+		sendBegin := time.Now().UnixMilli()
+		ok = rf.peers[request.target].Call("Raft.AppendEntries", request.args, request.reply)
+		FPrintf("sendAppendRequest", "server %v has sent appendRequest to server %v using %v ms args: %v \n", rf.me, request.target, time.Now().UnixMilli()-sendBegin, request.args)
+		if ok {
+			success = request.reply.Success
 		}
+	}
 
+	if ok && success {
 		//处理success的请求
 		reply := request.reply
 		args := request.args
-		rf.mu.Lock()
+		rf.lock("sendAppendRequest")
 		if reply.Term > rf.currentTerm {
 			rf.handOver(reply.Term, reply.LeaderId)
 		} else if reply.Term < rf.currentTerm {
@@ -660,32 +705,104 @@ func (rf *Raft) sendAppendEntries(workingTerm int64, requestChan chan *appendReq
 			} else {
 				rf.matchIndex[request.target] = max(args.PrevLogIndex, rf.matchIndex[request.target])
 			}
+			oldCommit := rf.commitIndex
 			rf.updateCommitIndex()
+			if rf.commitIndex > oldCommit {
+				FPrintf("sendAppendRequest", "leader %v commit [%v...%v]\n", rf.me, oldCommit+1, rf.commitIndex)
+				FPrintf("sendAppendRequest", "leader info:\n%v", rf.Info())
+			}
 		}
-		rf.mu.Unlock()
+		rf.unlock()
 	}
+
 }
+
+// 在workingTerm内持续向某节点发送AppendEntries请求,顺序发送接收,但是requestChan中的请求不保证顺序性
+//func (rf *Raft) sendAppendEntries(workingTerm int64, requestChan chan *appendRequest) {
+//	for request := range requestChan {
+//		if request.target == -1 {
+//			// 接收到关闭请求
+//			return
+//		}
+//		ok := false
+//		success := false
+//		// 发现term改变时设置退出
+//		exit := false
+//		for rf.leaderTerm() == workingTerm && (!ok || !success) { // 节点term更改可以打断重试
+//			if ok {
+//				reply := request.reply
+//				rf.mu.Lock()
+//				if reply.Term > rf.currentTerm {
+//					rf.handOver(reply.Term, reply.LeaderId)
+//					exit = true
+//				} else if reply.Term < rf.currentTerm {
+//					// 由于workingTerm <= reply.Term, reply.Term < rf.currentTerm说明该节点已进入新term,该请求已过期, 忽略
+//				} else {
+//					target := request.target
+//					if reply.XTerm > 0 {
+//						lastIndex := rf.lastLessIndex(reply.XTerm)
+//						if rf.log[lastIndex].Term == reply.XTerm {
+//							rf.nextIndex[target] = lastIndex
+//						} else {
+//							rf.nextIndex[target] = reply.XIndex
+//						}
+//					} else {
+//						rf.nextIndex[target] = reply.XLen
+//					}
+//					newRequest := rf.buildAppendRequest(target)
+//					request = &newRequest
+//				}
+//
+//				rf.mu.Unlock()
+//			}
+//			if exit {
+//				return
+//			}
+//			FPrintf("sendAppendEntries", "server %v try to send appendRequest to server %v args: %v \n",rf.me, request.target, request.args)
+//			sendBegin := time.Now().UnixMilli()
+//			ok = rf.peers[request.target].Call("Raft.AppendEntries", request.args, request.reply)
+//			FPrintf("sendAppendEntries", "server %v has sent appendRequest to server %v using %v ms args: %v \n",rf.me, request.target, time.Now().UnixMilli()-sendBegin, request.args)
+//			if ok {
+//				success = request.reply.Success
+//			}
+//		}
+//
+//		//处理success的请求
+//		reply := request.reply
+//		args := request.args
+//		rf.mu.Lock()
+//		if reply.Term > rf.currentTerm {
+//			rf.handOver(reply.Term, reply.LeaderId)
+//		} else if reply.Term < rf.currentTerm {
+//			// 过期的回复,直接忽略
+//		} else {
+//			// 成功向follower添加日志
+//			if len(args.Entries) > 0 {
+//				lastEntry := &args.Entries[len(args.Entries)-1]
+//				rf.nextIndex[request.target] = max(lastEntry.Index+1, rf.nextIndex[request.target])
+//				rf.matchIndex[request.target] = max(lastEntry.Index, rf.matchIndex[request.target])
+//			} else {
+//				rf.matchIndex[request.target] = max(args.PrevLogIndex, rf.matchIndex[request.target])
+//			}
+//			rf.updateCommitIndex()
+//		}
+//		rf.mu.Unlock()
+//	}
+//}
 
 // 从leader转为follower, 调用前应持有锁
 func (rf *Raft) handOver(newTerm int64, newLeader int) {
 	rf.lastHeartBeat = time.Now().UnixMilli()
 	rf.currentTerm = newTerm
+	rf.voteFor = newLeader
 	rf.leaderId = newLeader
-	for i := 0; i < rf.n; i++ {
-		go func(requestChan chan *appendRequest) {
-			closeReq := appendRequest{
-				target: -1,
-			}
-			requestChan <- &closeReq
-		}(rf.appendRequestChans[i])
-		rf.appendRequestChans[i] = nil
-	}
+	rf.persist()
 }
 
 // 计算新的commitIndex
 func (rf *Raft) updateCommitIndex() {
 	low := rf.commitIndex
-	high := rf.lastLogIndex
+	_, high := rf.lastLogTermAndIndex()
 	for high >= low {
 		mid := (high-low)/2 + low
 		cnt := 1
@@ -714,14 +831,14 @@ func (rf *Raft) leaderTerm() int64 {
 	return term
 }
 
-func (rf *Raft) heartBeat(workingTerm int64, requestChans []chan *appendRequest) {
+func (rf *Raft) heartBeat(workingTerm int64) {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		if rf.currentTerm != workingTerm {
 			rf.mu.Unlock()
 			return
 		}
-		rf.trigerBroadcast(requestChans, true)
+		rf.trigerBroadcast(true)
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
@@ -731,17 +848,22 @@ func (rf *Raft) heartBeat(workingTerm int64, requestChans []chan *appendRequest)
 func (rf *Raft) buildAppendRequest(peer int) (request appendRequest) {
 	prevLogPos := rf.findLogPosByIndex(rf.nextIndex[peer]) - 1
 	if prevLogPos < 0 {
-		DPrintf("server info:\n%v", rf.Info())
+		FPrintf("buildAppendRequest", "server info:\n%v", rf.Info())
 		panic("prevLogPos < 0")
 	}
 	prevLog := rf.log[prevLogPos]
+	lastLogTerm, lastLogIndex := rf.lastLogTermAndIndex()
 	request.args = &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.leaderId,
-		Entries:      rf.sliceLogs(rf.nextIndex[peer], rf.lastLogIndex),
+		Entries:      rf.sliceLogs(rf.nextIndex[peer], lastLogIndex),
 		PrevLogTerm:  prevLog.Term,
 		PrevLogIndex: prevLog.Index,
 		LeaderCommit: rf.commitIndex,
+	}
+	// 如果没有当前term的日志则不同步日志
+	if lastLogTerm < rf.currentTerm {
+		request.args.Entries = []LogEntry{}
 	}
 	request.target = peer
 	request.reply = &AppendEntriesReply{}
@@ -761,17 +883,11 @@ func (rf *Raft) sliceLogs(beginIndex int64, endIndex int64) []LogEntry {
 }
 
 // 向各peer发送一次AppendEntries
-func (rf *Raft) trigerBroadcast(requestChans []chan *appendRequest, holdingLock bool) {
-	requests := make([]appendRequest, rf.n)
+func (rf *Raft) trigerBroadcast(holdingLock bool) {
 	if !holdingLock {
 		rf.mu.Lock()
 	}
-	for i := 0; i < rf.n; i++ {
-		if i == rf.me {
-			continue
-		}
-		requests[i] = rf.buildAppendRequest(i)
-	}
+	workingTerm := rf.currentTerm
 	if !holdingLock {
 		rf.mu.Unlock()
 	}
@@ -779,27 +895,50 @@ func (rf *Raft) trigerBroadcast(requestChans []chan *appendRequest, holdingLock 
 		if i == rf.me {
 			continue
 		}
-		go func(request *appendRequest, requestChan chan *appendRequest) {
-			requestChan <- request
-		}(&requests[i], requestChans[i])
+		go rf.sendAppendRequest(workingTerm, i)
 	}
 }
 
 func (rf *Raft) Info() string {
 	//rf.mu.Lock()
 	//defer rf.mu.Lock()
+	lastLogTerm, lastLogIndex := rf.lastLogTermAndIndex()
 	ret := fmt.Sprintf("node: %v\n", rf.me) +
 		fmt.Sprintf("term: %v\n", rf.currentTerm) +
 		fmt.Sprintf("leaderId: %v\n", rf.leaderId) +
-		fmt.Sprintf("lastLogIndex: %v\n", rf.lastLogIndex) +
-		fmt.Sprintf("LastLogTerm: %v\n", rf.lastLogTerm) +
-		fmt.Sprintf("logs: %v\n", rf.log)
-	fmt.Sprintf("commitIndex: %v\n", rf.commitIndex)
+		fmt.Sprintf("lastLogIndex: %v\n", lastLogIndex) +
+		fmt.Sprintf("LastLogTerm: %v\n", lastLogTerm) +
+		fmt.Sprintf("logs: %v\n", rf.log) +
+		fmt.Sprintf("commitIndex: %v\n", rf.commitIndex)
 	if rf.leaderId == rf.me {
 		ret = ret + fmt.Sprintf("nextIndex: %v\n", rf.nextIndex) +
 			fmt.Sprintf("matchIndex: %v\n", rf.matchIndex)
 	}
 	return ret
+}
+
+func (rf *Raft) lastLogTermAndIndex() (int64, int64) {
+	lastLog := rf.log[len(rf.log)-1]
+	return lastLog.Term, lastLog.Index
+}
+
+func (rf *Raft) lock(holder string) {
+	begin := time.Now().UnixMilli()
+	rf.mu.Lock()
+	finish := time.Now().UnixMilli()
+	if finish-begin > 200 {
+		FPrintf("lock", "wait too long (%v ms) waiting for %v lock", finish-begin, holder)
+	}
+	rf.lastLock = time.Now().UnixMilli()
+	rf.holder = holder
+}
+
+func (rf *Raft) unlock() {
+	now := time.Now().UnixMilli()
+	if now-rf.lastLock > 200 {
+		FPrintf("unlock", "%v hold lock of server %v too long %vms\n", rf.holder, rf.me, now-rf.lastLock)
+	}
+	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -829,9 +968,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 启动协程将提交的命令应用到状态机
 	go rf.apply()
-
-	// 待发送给各peer的appendEnries channel
-	rf.appendRequestChans = make([]chan *appendRequest, rf.n)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

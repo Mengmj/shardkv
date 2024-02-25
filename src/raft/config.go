@@ -534,6 +534,9 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	}
 	nd, cmd := cfg.nCommitted(index)
 	if nd < n {
+		for i := 0; i < cfg.n; i++ {
+			DPrintf("server info:\n%v", cfg.rafts[i].Info())
+		}
 		cfg.t.Fatalf("only %d decided for Index %d; wanted %d",
 			nd, index, n)
 	}
@@ -601,6 +604,9 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 	}
 	if cfg.checkFinished() == false {
+		for i := 0; i < cfg.n; i++ {
+			DPrintf("server info:\n%v", cfg.rafts[i].Info())
+		}
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
