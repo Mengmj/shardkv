@@ -10,16 +10,19 @@ const Debug = false
 
 var flags = map[string]interface{}{
 	//"readPersist": nil,
-	"takeOffice": nil,
+	//"takeOffice": nil,
 	//"apply": nil,
-	"RequestVote":       nil,
-	"runElection":       nil,
-	"sendAppendEntries": nil,
-	"ticker":            nil,
-	"AppendEntries":     nil,
-	"unlock":            nil,
-	"lock":              nil,
-	"sendAppendRequest": nil,
+	//"RequestVote":       nil,
+	//"runElection":       nil,
+	//"sendAppendEntries": nil,
+	//"ticker":            nil,
+	//"AppendEntries":     nil,
+	//"unlock":            nil,
+	//"lock":              nil,
+	//"sendAppendRequest": nil,
+	"applierSnap":     nil,
+	"Snapshot":        nil,
+	"InstallSnapshot": nil,
 }
 
 func DPrintf(format string, a ...interface{}) {
