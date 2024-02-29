@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -15,10 +16,11 @@ const Debug = false
 const PrintF = false
 
 var flags = map[string]interface{}{
-	"serverApply":  nil,
-	"test":         nil,
-	"PutAppend":    nil,
-	"KVServer.Get": nil,
+	"serverApply": nil,
+	"trySnapshot": nil,
+	//"test":         nil,
+	//"PutAppend":    nil,
+	//"KVServer.Get": nil,
 }
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -45,74 +47,70 @@ type Op struct {
 	Seq     int64
 }
 
-type record struct {
-	clerkId int64
-	seq     int64
-	result  *string
+type Record struct {
+	ClerkId int64
+	Seq     int64
+	Result  string
 }
 
 type StateMachine struct {
-	mu           sync.Mutex
-	store        map[string]*string
-	records      map[int64]*record
-	appliedIndex int
+	Mu           sync.Mutex
+	Store        map[string]string
+	Records      map[int64]Record
+	AppliedIndex int
 }
 
 func (sm *StateMachine) execute(op *Op) {
-	//sm.mu.Lock()
-	//defer sm.mu.Unlock()
-	if r, ok := sm.records[op.ClerkId]; ok && r.seq >= op.Seq {
+	//sm.Mu.Lock()
+	//defer sm.Mu.Unlock()
+	if r, ok := sm.Records[op.ClerkId]; ok && r.Seq >= op.Seq {
 		// 重复的kv操作,直接忽略
 		return
 	}
-	var result *string
+	var result string
 	switch op.OpType {
 	case GetOp:
-		result = sm.store[op.Key]
+		result = sm.Store[op.Key]
 	case PutOp:
-		sm.store[op.Key] = &op.Value
+		sm.Store[op.Key] = op.Value
 	case AppendOp:
-		old := sm.store[op.Key]
+		old := sm.Store[op.Key]
 		var newValue string
-		if old == nil {
-			newValue = op.Value
-		} else {
-			newValue = *old + op.Value
-		}
-		sm.store[op.Key] = &newValue
+		newValue = old + op.Value
+		sm.Store[op.Key] = newValue
 	}
-	sm.records[op.ClerkId] = &record{
-		clerkId: op.ClerkId,
-		seq:     op.Seq,
-		result:  result,
+	sm.Records[op.ClerkId] = Record{
+		ClerkId: op.ClerkId,
+		Seq:     op.Seq,
+		Result:  result,
 	}
 }
 
 // 查询状态机对于clerk最后一次执行kv操作seq及结果
-func (sm *StateMachine) lastExecution(clerkId int64) (int64, *string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if r, ok := sm.records[clerkId]; ok { //已执行过该操作
-		return r.seq, r.result
+func (sm *StateMachine) lastExecution(clerkId int64) (int64, string) {
+	sm.Mu.Lock()
+	defer sm.Mu.Unlock()
+	if r, ok := sm.Records[clerkId]; ok { //已执行过该操作
+		return r.Seq, r.Result
 	} else {
-		return -1, nil
+		return -1, ""
 	}
 }
 
 func (sm *StateMachine) lastApplied() int {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	return sm.appliedIndex
+	sm.Mu.Lock()
+	defer sm.Mu.Unlock()
+	return sm.AppliedIndex
 }
 
-func (sm *StateMachine) retrieve(clerkId int64, seq int64) (*string, bool) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	r, ok := sm.records[clerkId]
-	if ok && r.seq == seq {
-		return r.result, true
+func (sm *StateMachine) retrieve(clerkId int64, seq int64) (string, bool) {
+	sm.Mu.Lock()
+	defer sm.Mu.Unlock()
+	r, ok := sm.Records[clerkId]
+	if ok && r.Seq == seq {
+		return r.Result, true
 	} else {
-		return nil, false
+		return "", false
 	}
 }
 
@@ -127,25 +125,38 @@ type KVServer struct {
 
 	// Your definitions here.
 	stateMachine StateMachine
+	persister    *raft.Persister
 }
 
 func (kv *KVServer) serverApply() {
 	for msg := range kv.applyCh {
-		kv.stateMachine.mu.Lock()
+		kv.stateMachine.Mu.Lock()
 		if msg.CommandValid { // 执行指令
-			if msg.CommandIndex != kv.stateMachine.appliedIndex+1 {
+			if msg.CommandIndex != kv.stateMachine.AppliedIndex+1 {
 				FPrintf("serverApply", "server info:\n%v", kv.rf.Info())
-				panic(fmt.Sprintf("StateMachine Execute Command Out Of Order Expect %v Got %v", kv.stateMachine.appliedIndex+1, msg.CommandIndex))
+				panic(fmt.Sprintf("StateMachine Execute Command Out Of Order Expect %v Got %v", kv.stateMachine.AppliedIndex+1, msg.CommandIndex))
 			}
 			op := msg.Command.(Op)
 			kv.stateMachine.execute(&op)
-			kv.stateMachine.appliedIndex++
+			kv.stateMachine.AppliedIndex++
 		} else if msg.SnapshotValid { // 恢复快照
-			// TODO 恢复快照
+			snapshot := msg.Snapshot
+			r := bytes.NewBuffer(snapshot)
+			d := labgob.NewDecoder(r)
+			if d.Decode(&kv.stateMachine.Store) != nil {
+				panic("read snapshot error")
+			}
+			if d.Decode(&kv.stateMachine.Records) != nil {
+				panic("read snapshot error")
+			}
+			if d.Decode(&kv.stateMachine.AppliedIndex) != nil {
+				panic("read snapshot error")
+			}
+			FPrintf("serverApply", "restore snapshot now state %v", kv.stateMachine)
 		} else {
 			panic(fmt.Sprintf("unexpected msg %v", msg))
 		}
-		kv.stateMachine.mu.Unlock()
+		kv.stateMachine.Mu.Unlock()
 	}
 }
 
@@ -159,9 +170,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	executedSeq, result := kv.stateMachine.lastExecution(args.ClerkId)
 	if executedSeq >= args.Seq {
 		reply.Err = OK
-		if result != nil {
-			reply.Value = *result
-		}
+		reply.Value = result
 		return
 	}
 	op := Op{
@@ -180,11 +189,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				reply.Err = ErrWrongLeader
 			} else {
 				reply.Err = OK
-				if result == nil {
-					reply.Value = ""
-				} else {
-					reply.Value = *result
-				}
+				reply.Value = result
 				break
 			}
 		} else {
@@ -256,6 +261,25 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func (kv *KVServer) trySnapshot() {
+	for !kv.killed() {
+		if kv.persister.RaftStateSize() > kv.maxraftstate {
+			kv.stateMachine.Mu.Lock()
+			snapshotIndex := kv.stateMachine.AppliedIndex
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.stateMachine.Store)
+			e.Encode(kv.stateMachine.Records)
+			e.Encode(kv.stateMachine.AppliedIndex)
+			snapshot := w.Bytes()
+			kv.rf.Snapshot(snapshotIndex, snapshot)
+			FPrintf("trySnapshot", "make snapshot for state %v", kv.stateMachine)
+			kv.stateMachine.Mu.Unlock()
+		}
+		time.Sleep(time.Duration(10) * time.Millisecond)
+	}
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/result service.
@@ -279,15 +303,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.stateMachine = StateMachine{
-		store:   make(map[string]*string),
-		records: make(map[int64]*record),
+		Store:   make(map[string]string),
+		Records: make(map[int64]Record),
 	}
+	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.serverApply()
-
+	if maxraftstate > 0 {
+		go kv.trySnapshot()
+	}
 	return kv
 }

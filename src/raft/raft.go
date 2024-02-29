@@ -178,13 +178,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	//FPrintf("Snapshot", "before Snapshot:\n%v", rf.Info())
 	rf.lock("Snapshot")
-	rf.snapshot = snapshot
-	lastSnapLogPos := rf.findLogPosByIndex(int64(index)) // 必然存在lastSnapLog
-	lastSnapLog := rf.log[lastSnapLogPos]
-	rf.SnapshotTerm = lastSnapLog.Term
-	rf.SnapshotIndex = lastSnapLog.Index
-	rf.log = rf.log[lastSnapLogPos+1:]
-	rf.persist()
+	if index > int(rf.SnapshotIndex) {
+		rf.snapshot = snapshot
+		lastSnapLogPos := rf.findLogPosByIndex(int64(index)) // 必然存在lastSnapLog
+		lastSnapLog := rf.log[lastSnapLogPos]
+		rf.SnapshotTerm = lastSnapLog.Term
+		rf.SnapshotIndex = lastSnapLog.Index
+		rf.log = rf.log[lastSnapLogPos+1:]
+		rf.persist()
+	}
 	//FPrintf("Snapshot", "after Snapshot:\n%v", rf.Info())
 	rf.mu.Unlock()
 
@@ -716,6 +718,10 @@ func (rf *Raft) apply() {
 		for _, msg := range msgs {
 			rf.applyCh <- msg
 			FPrintf("apply", "server %v commit %v\n", rf.me, msg)
+		}
+		if rf.killed() {
+			close(rf.applyCh)
+			return
 		}
 		endTime := time.Now().UnixMilli()
 		mms := max(0, 100-(endTime-startTime))
