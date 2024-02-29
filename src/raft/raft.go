@@ -105,41 +105,6 @@ func (rf *Raft) GetState() (int, bool) {
 	term = int(rf.currentTerm)
 	isleader = rf.leaderId == rf.me
 	rf.mu.Unlock()
-	//if isleader {
-	//	// 询问follower确认leader身份
-	//	replyChan := make(chan *CheckTermReply)
-	//	for i := 0; i < rf.n; i++ {
-	//		if i == rf.me {
-	//			continue
-	//		}
-	//		args := CheckTermArgs{Term: int64(term)}
-	//		reply := CheckTermReply{}
-	//		go func(replyChan chan *CheckTermReply, peer int) {
-	//			ok := rf.peers[peer].Call("Raft.CheckTerm", &args, &reply)
-	//			if ok {
-	//				replyChan <- &reply
-	//			} else {
-	//				replyChan <- nil
-	//			}
-	//		}(replyChan, i)
-	//	}
-	//	yes := 1
-	//	no := 0
-	//	for r := range replyChan {
-	//		if r == nil || r.Term != int64(term) {
-	//			no++
-	//		} else {
-	//			yes++
-	//		}
-	//		if yes > rf.n/2 {
-	//			break
-	//		}
-	//		if no > rf.n/2 {
-	//			isleader = false
-	//			break
-	//		}
-	//	}
-	//}
 	return term, isleader
 }
 
@@ -202,7 +167,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.SnapshotTerm)
 	d.Decode(&rf.SnapshotIndex)
 	rf.snapshot = rf.persister.ReadSnapshot()
-	FPrintf("readPersist", "read server state:\n%v", rf.Info())
+	//FPrintf("readPersist", "read server state:\n%v", rf.Info())
 }
 
 // the service says it has created a snapshot that has
@@ -211,7 +176,7 @@ func (rf *Raft) readPersist(data []byte) {
 // that Index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	FPrintf("Snapshot", "before Snapshot:\n%v", rf.Info())
+	//FPrintf("Snapshot", "before Snapshot:\n%v", rf.Info())
 	rf.lock("Snapshot")
 	rf.snapshot = snapshot
 	lastSnapLogPos := rf.findLogPosByIndex(int64(index)) // 必然存在lastSnapLog
@@ -220,7 +185,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.SnapshotIndex = lastSnapLog.Index
 	rf.log = rf.log[lastSnapLogPos+1:]
 	rf.persist()
-	FPrintf("Snapshot", "after Snapshot:\n%v", rf.Info())
+	//FPrintf("Snapshot", "after Snapshot:\n%v", rf.Info())
 	rf.mu.Unlock()
 
 }
@@ -273,11 +238,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastHeartBeat = time.Now().UnixMilli()
 		rf.voteFor = args.CandidateId
 		FPrintf("RequestVote", "node %v vote args: %v\n", rf.me, args)
-		FPrintf("RequestVote", "node info:\n%v", rf.Info())
+		//FPrintf("RequestVote", "node info:\n%v", rf.Info())
 		stateChange = true
 	} else {
 		FPrintf("RequestVote", "server %v refuse vote args: %v\n", rf.me, args)
-		FPrintf("RequestVote", "node info:\n%v", rf.Info())
+		//FPrintf("RequestVote", "node info:\n%v", rf.Info())
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = grant
@@ -340,9 +305,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	term = int(rf.currentTerm)
 	isLeader = rf.leaderId == rf.me
-	rf.mu.Unlock()
+	//rf.mu.Unlock()
 	if isLeader {
-		rf.mu.Lock()
+		//rf.mu.Lock()
 		_, lastIndex := rf.lastLogTermAndIndex()
 		entry := LogEntry{
 			Command: command,
@@ -353,8 +318,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = int(entry.Index)
 		term = int(entry.Term)
 		rf.persist()
-		rf.mu.Unlock()
+		//rf.mu.Unlock()
+		for i := 0; i < rf.n; i++ {
+			if i == rf.me {
+				continue
+			}
+			go func(workingTerm int64, peer int) {
+				rf.sendAppendRequest(workingTerm, peer)
+			}(rf.currentTerm, i)
+		}
 	}
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
@@ -502,7 +476,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.persist()
 		}
 	}(&changeState)
-	FPrintf("InstallSnapshot", "before install snapshot:\n%v", rf.Info())
+	//FPrintf("InstallSnapshot", "before install snapshot:\n%v", rf.Info())
 	if args.Term < rf.currentTerm {
 		return
 	}
@@ -528,7 +502,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	} else {
 		rf.log = rf.log[lastSnapLogPos+1:]
 	}
-	FPrintf("InstallSnapshot", "install snapshot influence:\n%v", rf.Info())
+	//FPrintf("InstallSnapshot", "install snapshot influence:\n%v", rf.Info())
 }
 
 type AppendEntriesArgs struct {
@@ -638,10 +612,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.commitIndex > oldCommit {
 			FPrintf("AppendEntries", "server %v commit [%v...%v]\n", rf.me, oldCommit+1, rf.commitIndex)
 		}
-		FPrintf("AppendEntries", "server info:\n %v", rf.Info())
+		//FPrintf("AppendEntries", "server info:\n %v", rf.Info())
 	} else {
 		FPrintf("AppendEntries", "server %v reject append %v\n", rf.me, args)
-		FPrintf("AppendEntries", "server info:\n %v", rf.Info())
+		//FPrintf("AppendEntries", "server info:\n %v", rf.Info())
 	}
 }
 
@@ -706,7 +680,7 @@ func (rf *Raft) takeOffice(term int64) {
 		// 启动心跳协程
 		go rf.heartBeat(rf.currentTerm)
 		FPrintf("takeOffice", "node %v become leader of term %v", rf.me, rf.currentTerm)
-		FPrintf("takeOffice", "leader Info:\n%v", rf.Info())
+		//FPrintf("takeOffice", "leader Info:\n%v", rf.Info())
 	}
 	rf.mu.Unlock()
 }
@@ -744,8 +718,8 @@ func (rf *Raft) apply() {
 			FPrintf("apply", "server %v commit %v\n", rf.me, msg)
 		}
 		endTime := time.Now().UnixMilli()
-		ms := max(0, 100-(endTime-startTime))
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		mms := max(0, 100-(endTime-startTime))
+		time.Sleep(time.Duration(mms) * time.Microsecond)
 	}
 
 }
@@ -767,11 +741,11 @@ type appendRequest struct {
 func (rf *Raft) sendAppendRequest(workingTerm int64, peer int) {
 	rf.lock("sendAppendRequest")
 	request := rf.buildAppendRequest(peer)
-	lastSend := rf.lastSend[peer]
+	//lastSend := rf.lastSend[peer]
 	rf.unlock()
-	if time.Now().UnixMilli()-lastSend < 50 { // 避免频繁向同一个peer发送
-		return
-	}
+	//if time.Now().UnixMilli()-lastSend < 10 { // 避免频繁向同一个peer发送
+	//	return
+	//}
 	ok := false
 	success := false
 	for rf.leaderTerm() == workingTerm && (!ok || !success) {
@@ -869,7 +843,7 @@ func (rf *Raft) sendAppendRequest(workingTerm int64, peer int) {
 				rf.updateCommitIndex()
 				if rf.commitIndex > oldCommit {
 					FPrintf("sendAppendRequest", "leader %v commit [%v...%v]\n", rf.me, oldCommit+1, rf.commitIndex)
-					FPrintf("sendAppendRequest", "leader info:\n%v", rf.Info())
+					//FPrintf("sendAppendRequest", "leader info:\n%v", rf.Info())
 				}
 			}
 			rf.unlock()

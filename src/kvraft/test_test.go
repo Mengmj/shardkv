@@ -97,7 +97,7 @@ func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli in
 func check(cfg *config, t *testing.T, ck *Clerk, key string, value string) {
 	v := Get(cfg, ck, key, nil, -1)
 	if v != value {
-		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
+		t.Fatalf("GetOp(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
 }
 
@@ -128,12 +128,12 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 	}
 }
 
-// predict effect of Append(k, val) if old value is prev.
+// predict effect of AppendOp(k, val) if old result is prev.
 func NextValue(prev string, val string) string {
 	return prev + val
 }
 
-// check that for a specific client all known appends are present in a value,
+// check that for a specific client all known appends are present in a result,
 // and in order
 func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 	lastoff := -1
@@ -141,20 +141,20 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
 		off := strings.Index(v, wanted)
 		if off < 0 {
-			t.Fatalf("%v missing element %v in Append result %v", clnt, wanted, v)
+			t.Fatalf("%v missing element %v in AppendOp result %v", clnt, wanted, v)
 		}
 		off1 := strings.LastIndex(v, wanted)
 		if off1 != off {
-			t.Fatalf("duplicate element %v in Append result", wanted)
+			t.Fatalf("duplicate element %v in AppendOp result", wanted)
 		}
 		if off <= lastoff {
-			t.Fatalf("wrong order for element %v in Append result", wanted)
+			t.Fatalf("wrong order for element %v in AppendOp result", wanted)
 		}
 		lastoff = off
 	}
 }
 
-// check that all known appends are present in a value,
+// check that all known appends are present in a result,
 // and are in order for each concurrent client.
 func checkConcurrentAppends(t *testing.T, v string, counts []int) {
 	nclients := len(counts)
@@ -164,14 +164,14 @@ func checkConcurrentAppends(t *testing.T, v string, counts []int) {
 			wanted := "x " + strconv.Itoa(i) + " " + strconv.Itoa(j) + " y"
 			off := strings.Index(v, wanted)
 			if off < 0 {
-				t.Fatalf("%v missing element %v in Append result %v", i, wanted, v)
+				t.Fatalf("%v missing element %v in AppendOp result %v", i, wanted, v)
 			}
 			off1 := strings.LastIndex(v, wanted)
 			if off1 != off {
-				t.Fatalf("duplicate element %v in Append result", wanted)
+				t.Fatalf("duplicate element %v in AppendOp result", wanted)
 			}
 			if off <= lastoff {
-				t.Fatalf("wrong order for element %v in Append result", wanted)
+				t.Fatalf("wrong order for element %v in AppendOp result", wanted)
 			}
 			lastoff = off
 		}
@@ -200,7 +200,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 	}
 }
 
-// Basic test is as follows: one or more clients submitting Append/Get
+// Basic test is as follows: one or more clients submitting AppendOp/GetOp
 // operations to set of servers for some period of time.  After the period is
 // over, test checks that all appended values are present and in order for a
 // particular key.  If unreliable is set, RPCs may fail.  If crash is set, the
@@ -282,7 +282,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					j++
 				} else if randomkeys && (rand.Int()%1000) < 100 {
 					// we only do this when using random keys, because it would break the
-					// check done after Get() operations
+					// check done after GetOp() operations
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
@@ -290,7 +290,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						t.Fatalf("get wrong result, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
 			}
@@ -483,6 +483,7 @@ func TestOnePartition4A(t *testing.T) {
 	ck := cfg.makeClient(cfg.All())
 
 	Put(cfg, ck, "1", "13", nil, -1)
+	FPrintf("test", "put first kv")
 
 	cfg.begin("Test: progress in majority (4A)")
 
@@ -492,8 +493,10 @@ func TestOnePartition4A(t *testing.T) {
 	ckp1 := cfg.makeClient(p1)  // connect ckp1 to p1
 	ckp2a := cfg.makeClient(p2) // connect ckp2a to p2
 	ckp2b := cfg.makeClient(p2) // connect ckp2b to p2
+	FPrintf("test", "Partition the cluster")
 
 	Put(cfg, ckp1, "1", "14", nil, -1)
+	FPrintf("test", "put kv")
 	check(cfg, t, ckp1, "1", "14")
 
 	cfg.end()
@@ -513,9 +516,9 @@ func TestOnePartition4A(t *testing.T) {
 
 	select {
 	case <-done0:
-		t.Fatalf("Put in minority completed")
+		t.Fatalf("PutOp in minority completed")
 	case <-done1:
-		t.Fatalf("Get in minority completed")
+		t.Fatalf("GetOp in minority completed")
 	case <-time.After(time.Second):
 	}
 
@@ -536,13 +539,13 @@ func TestOnePartition4A(t *testing.T) {
 	select {
 	case <-done0:
 	case <-time.After(30 * 100 * time.Millisecond):
-		t.Fatalf("Put did not complete")
+		t.Fatalf("PutOp did not complete")
 	}
 
 	select {
 	case <-done1:
 	case <-time.After(30 * 100 * time.Millisecond):
-		t.Fatalf("Get did not complete")
+		t.Fatalf("GetOp did not complete")
 	default:
 	}
 
