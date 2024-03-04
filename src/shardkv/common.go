@@ -1,5 +1,12 @@
 package shardkv
 
+import (
+	"fmt"
+	"log"
+	"os"
+	"sync"
+)
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -27,6 +34,9 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClerkId int64
+	Seq     int64
+	Shard   int
 }
 
 type PutAppendReply struct {
@@ -36,9 +46,60 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClerkId int64
+	Seq     int64
+	Shard   int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+var flags = map[string]interface{}{
+	"test":           nil,
+	"PutAppend":      nil,
+	"wait":           nil,
+	"queryConfig":    nil,
+	"consume":        nil,
+	"updateConfig":   nil,
+	"moveShard":      nil,
+	"execute":        nil,
+	"makeSnapshot":   nil,
+	"resumeSnapshot": nil,
+}
+
+const PringF = true
+
+func FPrint(flag string, format string, a ...interface{}) {
+	if _, ok := flags[flag]; ok && PringF {
+		log.Printf(flag+":::"+format, a...)
+	}
+}
+
+type logger struct {
+	owner  string
+	output *os.File
+	mu     sync.Mutex
+}
+
+func makeLogger(owner string) *logger {
+	l := logger{
+		owner: owner,
+	}
+	f, err := os.Create(fmt.Sprintf("%v.log", owner))
+	if err != nil {
+		panic("fail create log file")
+	}
+	l.output = f
+	return &l
+}
+func (l *logger) log(format string, a ...interface{}) {
+	l.mu.Lock()
+	msg := fmt.Sprintf(format, a...)
+	_, err := fmt.Fprintf(l.output, msg)
+	if err != nil {
+		panic("log err")
+	}
+	l.mu.Unlock()
 }

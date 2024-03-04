@@ -1,5 +1,7 @@
 package shardctrler
 
+import "log"
+
 //
 // Shard controller: assigns shards to replication groups.
 //
@@ -29,12 +31,15 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK       = "OK"
+	Answered = "Answered" // 该请求已被确认回复
 )
 
 type Err string
 
 type JoinArgs struct {
+	ClerkId int64
+	Seq     int64
 	Servers map[int][]string // new GID -> servers mappings
 }
 
@@ -44,7 +49,9 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	ClerkId int64
+	Seq     int64
+	GIDs    []int
 }
 
 type LeaveReply struct {
@@ -53,8 +60,10 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	ClerkId int64
+	Seq     int64
+	Shard   int
+	GID     int
 }
 
 type MoveReply struct {
@@ -63,11 +72,27 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	ClerkId int64
+	Seq     int64
+	Num     int // desired config number
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+var flags = map[string]interface{}{
+	//"JoinOp": nil,
+	//"clerk":  nil,
+	//"check":  nil,
+}
+
+const PringF = true
+
+func FPrintf(flag string, format string, a ...interface{}) {
+	if _, ok := flags[flag]; ok && PringF {
+		log.Printf(flag+":::"+format, a...)
+	}
 }

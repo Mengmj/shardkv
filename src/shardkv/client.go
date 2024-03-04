@@ -8,7 +8,10 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
 import "6.5840/shardctrler"
@@ -38,6 +41,9 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu      sync.Mutex
+	ClerkId int64
+	Seq     int64
 }
 
 // the tester calls MakeClerk.
@@ -52,6 +58,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.ClerkId = nrand()
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -62,7 +70,12 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
-
+	args.Shard = key2shard(key)
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClerkId = ck.ClerkId
+	ck.Seq++
+	args.Seq = ck.Seq
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -96,8 +109,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
-
+	args.Shard = key2shard(key)
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClerkId = ck.ClerkId
+	ck.Seq++
+	args.Seq = ck.Seq
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -110,6 +127,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
+					//FPrint("PutAppend", "wrong group %v", gid)
 					break
 				}
 				// ... not ok, or ErrWrongLeader
@@ -122,8 +140,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, PutOp)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, AppendOp)
 }

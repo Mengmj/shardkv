@@ -58,6 +58,7 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 		t.Fatalf("Num wrong")
 	}
 	if c1.Shards != c2.Shards {
+		FPrintf("check", "c1 : %v \n c2 : %v", c1.Shards, c2.Shards)
 		t.Fatalf("Shards wrong")
 	}
 	if len(c1.Groups) != len(c2.Groups) {
@@ -89,7 +90,6 @@ func TestBasic(t *testing.T) {
 		fmt.Printf("Test: Basic leave/join ...\n")
 
 		cfa[0] = ck.Query(-1)
-
 		check(t, []int{}, ck)
 
 		var gid1 int = 1
@@ -105,6 +105,7 @@ func TestBasic(t *testing.T) {
 		cfx := ck.Query(-1)
 		sa1 := cfx.Groups[gid1]
 		if len(sa1) != 3 || sa1[0] != "x" || sa1[1] != "y" || sa1[2] != "z" {
+			fmt.Printf("groups %v\n", cfx.Groups)
 			t.Fatalf("wrong servers for gid %v: %v\n", gid1, sa1)
 		}
 		sa2 := cfx.Groups[gid2]
@@ -254,7 +255,6 @@ func TestBasic(t *testing.T) {
 				}
 			}
 		}
-
 		fmt.Printf("  ... Passed\n")
 	})
 }
