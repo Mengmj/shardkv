@@ -212,15 +212,18 @@ func (sc *ShardCtrler) balanceShards(cfg *Config) {
 	avg := NShards / len(cfg.Groups)
 	rich := []int{}
 	poor := []int{}
+	all := []int{}
 	for g, allocated := range sc.allocation {
 		if len(allocated) < avg {
 			poor = append(poor, g)
 		} else if len(allocated) > avg {
 			rich = append(rich, g)
 		}
+		all = append(all, g)
 	}
 	sort.Ints(rich)
 	sort.Ints(poor)
+	sort.Ints(all)
 	//fmt.Printf("unallocated: %v\n", unallocated)
 	//fmt.Printf("poor: %v\n", poor)
 	//fmt.Printf("rich: %v\n", rich)
@@ -238,6 +241,13 @@ func (sc *ShardCtrler) balanceShards(cfg *Config) {
 				}
 			}
 		}
+	}
+	for _, g := range all {
+		if len(unallocated) == 0 {
+			break
+		}
+		sc.allocation[g] = append(sc.allocation[g], unallocated[0])
+		unallocated = unallocated[1:]
 	}
 	for g, shards := range sc.allocation {
 		for _, s := range shards {

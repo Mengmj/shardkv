@@ -869,11 +869,17 @@ func TestChallenge1Delete(t *testing.T) {
 	}
 
 	total := 0
+	raftTotal := 0
+	snapshotTotal := 0
+	time.Sleep(time.Duration(3) * time.Second)
 	for gi := 0; gi < cfg.ngroups; gi++ {
 		for i := 0; i < cfg.n; i++ {
 			raft := cfg.groups[gi].saved[i].RaftStateSize()
 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
+			fmt.Printf("raft: %v, snap: %v\n", raft, snap)
 			total += raft + snap
+			raftTotal += raft
+			snapshotTotal += snap
 		}
 	}
 

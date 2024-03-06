@@ -18,6 +18,7 @@ const (
 	PutOp        = "PutOP"
 	AppendOp     = "AppendOp"
 	InstallShard = "InstallShard"
+	RemoveShard  = "RemoveShard"
 )
 
 type Op struct {
@@ -29,29 +30,29 @@ type Op struct {
 	Args   interface{}
 }
 
+const (
+	Idle = iota
+	Working
+	In
+
+	Ready
+	WaitData
+)
+
 type KVServer struct {
-	mu           sync.RWMutex
-	logger       *logger
-	owner        string
-	Status       int // 状态 0: 初始状态,无服务, 1:正常服务 2: 不接受新请求,待迁出 3:待迁入
-	Shard        int // 负责的shard
-	ConfigNum    int
-	Store        map[string]string // 存储的内容
-	AppliedSeq   map[int64]int64   // 各client的进度
-	RepliedValue map[int64]string  // 给各clint的回复
+	mu          sync.RWMutex
+	logger      *logger
+	owner       string
+	Status      int
+	OutShards   []*InstallShardArgs // 要迁出的数据副本, 数据可能未就绪(等待迁入然后才能迁出)
+	InConfigNum int                 //导致shard迁入的版本号
+	MoveInNums  map[int]interface{} //成功迁入的版本号
+	// 以下是需要迁移的字段
+	Shard        int                // 负责的shard
+	Store        map[string]*string // 存储的内容
+	AppliedSeq   map[int64]int64    // 各client的进度
+	RepliedValue map[int64]*string  // 给各clint的回复
 }
-
-//func (s *KVServer) commitIndex(){
-//	commmitIndex(s.appliedIndex, s.IndexChan)
-//}
-
-//func commmitIndex(appliedIndex *int64, indexChan chan int64) {
-//	for index := range indexChan {
-//		for !atomic.CompareAndSwapInt64(appliedIndex, index-1, index) {
-//			// 持续尝试更新index
-//		}
-//	}
-//}
 
 func (s *KVServer) getStatus() int {
 	s.mu.RLock()
@@ -62,75 +63,107 @@ func (s *KVServer) getStatus() int {
 func (s *KVServer) getConfigNum() int {
 	s.mu.RLock()
 	s.mu.RUnlock()
-	return s.ConfigNum
+	return s.InConfigNum
+}
+
+func (s *KVServer) installShard(args InstallShardArgs) {
+	if _, ok := s.MoveInNums[args.OutConfigNum]; ok {
+		s.logger.log("shard of configNum %v already moved in", args.OutConfigNum)
+		return
+	}
+	switch {
+	case args.OutConfigNum == s.InConfigNum:
+		if s.Status == In {
+			s.Status = Working
+			s.Store = args.Store
+			s.AppliedSeq = args.AppliedSeq
+			s.RepliedValue = args.RepliedValue
+			s.MoveInNums[args.OutConfigNum] = nil
+			s.logger.log("install shard %v for working InConfigNum:%v", s.Shard, s.InConfigNum)
+		}
+	case args.OutConfigNum < s.InConfigNum || s.InConfigNum == 0:
+		for _, outShard := range s.OutShards {
+			if outShard.InConfigNum == args.OutConfigNum && outShard.Status == WaitData {
+				outShard.Store = args.Store
+				outShard.AppliedSeq = args.AppliedSeq
+				outShard.RepliedValue = args.RepliedValue
+				outShard.Status = Ready
+				outShard.mu.Unlock()
+				s.MoveInNums[args.OutConfigNum] = nil
+				s.logger.log("install shard %v for out OutConfigNum:%v", s.Shard, outShard.OutConfigNum)
+			}
+		}
+	}
 }
 
 // 消费分派到shard的操作
 func (s *KVServer) execute(op Op) {
+	s.logger.log("start op %v", op)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	switch op.OpType {
 	case GetOp:
 		args := op.Args.(GetArgs)
-		s.mu.Lock()
-		if s.Status == 1 {
+		if s.Status == Working {
 			if applied, ok := s.AppliedSeq[args.ClerkId]; ok && applied >= args.Seq {
 				// 当前操作已执行过, 不再响应
 			} else {
 				s.RepliedValue[args.ClerkId] = s.Store[args.Key]
 				s.AppliedSeq[args.ClerkId] = args.Seq
-			}
-		}
-		s.mu.Unlock()
-	case PutOp:
-		args := op.Args.(PutAppendArgs)
-		s.mu.Lock()
-		if s.Status == 1 {
-			if applied, ok := s.AppliedSeq[args.ClerkId]; ok && applied >= args.Seq {
-				// 当前操作已执行过, 不再响应
-			} else {
-				s.Store[args.Key] = args.Value
-				s.AppliedSeq[args.ClerkId] = args.Seq
-			}
-		}
-		s.mu.Unlock()
-	case AppendOp:
-		args := op.Args.(PutAppendArgs)
-		s.mu.Lock()
-		if s.Status == 1 {
-			if applied, ok := s.AppliedSeq[args.ClerkId]; ok && applied >= args.Seq {
-				// 当前操作已执行过, 不再响应
-			} else {
-				s.Store[args.Key] = s.Store[args.Key] + args.Value
-				s.AppliedSeq[args.ClerkId] = args.Seq
-			}
-		}
-		s.mu.Unlock()
-	case InstallShard:
-		args := op.Args.(InstallShardArgs)
-		s.mu.Lock()
-		if s.Status == 3 {
-			if s.ConfigNum == args.ConfigNum {
-				s.Status = 1
-				s.Store = args.Store
-				s.AppliedSeq = args.AppliedSeq
-				s.RepliedValue = args.RepliedValue
-				s.logger.log("install shard %v into %v", s.Shard, s.owner)
-			} else {
-				s.logger.log("unmatched configNum server: %v, args: %v", s.ConfigNum, args.ConfigNum)
+				s.logger.log("get %v %v after execution", args.Key, s.RepliedValue[args.ClerkId])
 			}
 		} else {
-			s.logger.log("no need to install status %v", s.Status)
+			s.logger.log("not serving for shard %v", s.Shard)
 		}
-		s.mu.Unlock()
+	case PutOp:
+		args := op.Args.(PutAppendArgs)
+		if s.Status == Working {
+			if applied, ok := s.AppliedSeq[args.ClerkId]; ok && applied >= args.Seq {
+				// 当前操作已执行过, 不再响应
+			} else {
+				s.Store[args.Key] = &args.Value
+				s.AppliedSeq[args.ClerkId] = args.Seq
+				s.logger.log("put %v %v after execution", args.Key, args.Value)
+			}
+		} else {
+			s.logger.log("not serving for shard %v", s.Shard)
+		}
+	case AppendOp:
+		args := op.Args.(PutAppendArgs)
+		if s.Status == Working {
+			if applied, ok := s.AppliedSeq[args.ClerkId]; ok && applied >= args.Seq {
+				// 当前操作已执行过, 不再响应
+			} else {
+				newValue := *s.Store[args.Key] + args.Value
+				s.Store[args.Key] = &newValue
+				s.AppliedSeq[args.ClerkId] = args.Seq
+				s.logger.log("append %v %v after execution", args.Key, args.Value)
+			}
+		} else {
+			s.logger.log("not serving for shard %v", s.Shard)
+		}
+	case InstallShard:
+		s.installShard(op.Args.(InstallShardArgs))
+	case RemoveShard:
+		outConfigNum := op.Args.(int)
+		for i, outShard := range s.OutShards {
+			if outShard.OutConfigNum == outConfigNum {
+				s.OutShards = append(s.OutShards[:i], s.OutShards[i+1:]...)
+				s.logger.log("remove shard %v OutConfigNum %v after moving", s.Shard, outConfigNum)
+			}
+		}
 	default:
 		panic("unexpected msg")
 	}
+	s.logger.log("finish op %v", op)
 }
 
 func MakeKVServer(gid int, peer int, shard int) *KVServer {
 	server := &KVServer{
-		owner:  fmt.Sprintf("%v-%v", gid, peer),
-		Shard:  shard,
-		logger: makeLogger(fmt.Sprintf("%v_%v_%v", gid, peer, shard)),
+		owner:      fmt.Sprintf("%v-%v", gid, peer),
+		Shard:      shard,
+		logger:     makeLogger(fmt.Sprintf("%v_%v_%v", gid, peer, shard)),
+		MoveInNums: map[int]interface{}{},
 	}
 	return server
 }
@@ -181,22 +214,41 @@ func (kv *ShardKV) makeSnapshot() {
 			kv.logger.log("get lock to make snapshot")
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
-			e.Encode(kv.configNum)
-			e.Encode(kv.configs)
-			e.Encode(kv.appliedIndex)
+			if e.Encode(kv.configNum) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.appliedIndex) != nil {
+				panic("encode error")
+			}
 			for i := 0; i < shardctrler.NShards; i++ {
 				server := kv.shardServers[i]
-				e.Encode(server.Status)
-				e.Encode(server.ConfigNum)
-				e.Encode(server.Store)
-				e.Encode(server.AppliedSeq)
-				e.Encode(server.RepliedValue)
+				panicIfEncodeErr(e, server.Status)
+				panicIfEncodeErr(e, server.InConfigNum)
+				panicIfEncodeErr(e, server.Store)
+				panicIfEncodeErr(e, server.AppliedSeq)
+				panicIfEncodeErr(e, server.RepliedValue)
+				panicIfEncodeErr(e, server.MoveInNums)
+				panicIfEncodeErr(e, len(server.OutShards))
+				for _, outShard := range server.OutShards {
+					kv.logger.log("include out Shard in snapshot")
+					panicIfEncodeErr(e, outShard)
+				}
 			}
 			kv.rf.Snapshot(int(kv.appliedIndex), w.Bytes())
 			kv.logger.log("size after snapshot %v", kv.persister.RaftStateSize())
 			kv.smMu.Unlock()
 		}
 		time.Sleep(time.Duration(10) * time.Millisecond)
+	}
+}
+
+func panicIfEncodeErr(e *labgob.LabEncoder, i interface{}) {
+	if e.Encode(i) != nil {
+		panic("encode error")
+	}
+	fmt.Printf("length is %v (%v)\n", encodeLength(i), i)
+}
+
+func panicIfDecodeErr(d *labgob.LabDecoder, i interface{}) {
+	if d.Decode(i) != nil {
+		panic("decode error")
 	}
 }
 
@@ -213,8 +265,28 @@ func (kv *ShardKV) queryConfig() {
 					Shard:  -1,
 					Args:   newConfig,
 				}
-				kv.rf.Start(op)
-				kv.logger.log("submit new Config op %v", op)
+				_, beginTerm, _ := kv.rf.Start(op)
+				kv.logger.log("start commit new Config %v", newConfig)
+				// 等待状态机更新config或失败(term变更)
+				fail := false
+				for kv.getConfigNum() < newConfig.Num {
+					if currentTerm, _ := kv.rf.GetState(); currentTerm != beginTerm {
+						fail = true
+						break
+					}
+					time.Sleep(time.Duration(10) * time.Millisecond)
+				}
+				// 成功后检查是否需要迁移shard
+				if !fail {
+					kv.logger.log("success to apply new Config %v", newConfig.Num)
+					for i := 0; i < shardctrler.NShards; i++ {
+						kv.shardServers[i].mu.RLock()
+						for _, outArgs := range kv.shardServers[i].OutShards {
+							go kv.moveShard(outArgs)
+						}
+						kv.shardServers[i].mu.RUnlock()
+					}
+				}
 			}
 		}
 		ms := 50 + nrand()%100
@@ -244,11 +316,15 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 type InstallShardArgs struct {
+	mu           sync.Mutex
 	Shard        int
-	ConfigNum    int
-	Store        map[string]string
+	Ends         []string
+	InConfigNum  int // 在原宿主迁入的版本号
+	OutConfigNum int // 导致迁出的版本号
+	Status       int
+	Store        map[string]*string
 	AppliedSeq   map[int64]int64
-	RepliedValue map[int64]string
+	RepliedValue map[int64]*string
 }
 
 type InstallShardReply struct {
@@ -256,41 +332,41 @@ type InstallShardReply struct {
 }
 
 func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply) {
-	kv.smMu.RLock()
-	defer kv.smMu.RUnlock()
-	shardServer := kv.shardServers[args.Shard]
-	switch {
-	case args.ConfigNum > shardServer.getConfigNum():
+	//kv.smMu.RLock()
+	//defer kv.smMu.RUnlock()
+	//shardServer := kv.shardServers[args.Shard]
+	//InConfigNum := shardServer.getConfigNum()
+	index, beginTerm, isLeader := kv.rf.Start(Op{
+		OpType: InstallShard,
+		Shard:  args.Shard,
+		Args:   *args,
+	})
+	if !isLeader {
 		reply.Success = false
-	case args.ConfigNum == shardServer.getConfigNum():
-		if shardServer.getStatus() == 3 {
-			index, beginTerm, isLeader := kv.rf.Start(Op{
-				OpType: InstallShard,
-				Shard:  args.Shard,
-				Args:   *args,
-			})
-			if !isLeader {
-				reply.Success = false
-			}
-			for kv.getAppliedIndex() < int64(index) {
-				if currentTerm, _ := kv.rf.GetState(); currentTerm != beginTerm {
-					break
-				}
-				time.Sleep(time.Duration(100) * time.Millisecond)
-			}
-			shardServer.mu.RLock()
-			if shardServer.Status == 1 && shardServer.ConfigNum == args.ConfigNum {
-				reply.Success = true
-			}
-			shardServer.mu.RUnlock()
-		} else {
-			reply.Success = true
+		return
+	}
+	kv.logger.log("start to commit install shard %v", args.Shard)
+	for kv.getAppliedIndex() < int64(index) {
+		if currentTerm, _ := kv.rf.GetState(); currentTerm != beginTerm {
+			reply.Success = false
+			break
 		}
-	case args.ConfigNum < shardServer.getConfigNum():
-		// 已过时的分片
-		reply.Success = true
+		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+	reply.Success = kv.HasMovedIn(args.Shard, args.OutConfigNum)
+	// 即使通过raft达成一致, shard也不一定成功迁入
+	if reply.Success {
+		kv.logger.log("agree to install shard %v", args.Shard)
 	}
 
+}
+
+func (kv *ShardKV) HasMovedIn(shard int, outConfigNum int) bool {
+	server := kv.shardServers[shard]
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	_, ok := server.MoveInNums[outConfigNum]
+	return ok
 }
 
 func (kv *ShardKV) getAppliedIndex() int64 {
@@ -325,7 +401,10 @@ func (kv *ShardKV) wait(clerkId int64, seq int64, command Op) (Err Err, Value st
 		server.mu.RLock()
 		if server.AppliedSeq[clerkId] >= seq {
 			Err = OK
-			Value = server.RepliedValue[clerkId]
+			valuePtr := server.RepliedValue[clerkId]
+			if valuePtr != nil {
+				Value = *valuePtr
+			}
 		} else { // 达成共识却没有执行,因为分片已迁出
 			Err = ErrWrongGroup
 		}
@@ -365,16 +444,31 @@ func (kv *ShardKV) consume() {
 			for i := 0; i < shardctrler.NShards; i++ {
 				kv.shardServers[i].mu.Lock()
 			}
-			d.Decode(&kv.configNum)
-			d.Decode(&kv.configs)
-			d.Decode(&kv.appliedIndex)
+			panicIfDecodeErr(d, &kv.configNum)
+			panicIfDecodeErr(d, &kv.configs)
+			panicIfDecodeErr(d, &kv.appliedIndex)
 			for i := 0; i < shardctrler.NShards; i++ {
 				server := kv.shardServers[i]
-				d.Decode(&server.Status)
-				d.Decode(&server.ConfigNum)
-				d.Decode(&server.Store)
-				d.Decode(&server.AppliedSeq)
-				d.Decode(&server.RepliedValue)
+				panicIfDecodeErr(d, &server.Status)
+				if server.Status != Idle && server.Status != Working && server.Status != In {
+					kv.logger.log("")
+				}
+				panicIfDecodeErr(d, &server.InConfigNum)
+				panicIfDecodeErr(d, &server.Store)
+				panicIfDecodeErr(d, &server.AppliedSeq)
+				panicIfDecodeErr(d, &server.RepliedValue)
+				panicIfDecodeErr(d, &server.MoveInNums)
+				server.OutShards = []*InstallShardArgs{}
+				var outCount int
+				panicIfDecodeErr(d, &outCount)
+				for j := 0; j < outCount; j++ {
+					outData := InstallShardArgs{}
+					panicIfDecodeErr(d, &outData)
+					if outData.Status == WaitData {
+						outData.mu.Lock()
+					}
+					server.OutShards = append(server.OutShards, &outData)
+				}
 			}
 			for i := 0; i < shardctrler.NShards; i++ {
 				kv.shardServers[i].mu.Unlock()
@@ -394,113 +488,119 @@ func (kv *ShardKV) updateConfig(newConfig shardctrler.Config) {
 	defer kv.cfgMu.Unlock()
 	if newConfig.Num == kv.configNum+1 { // 只接受连续的版本
 		lastConfig := kv.configs[len(kv.configs)-1]
-		moveOut := []int{}
-		moveIn := []int{}
-		newShard := []int{}
+		kv.configs = append(kv.configs, newConfig)
+		kv.configNum++
+		var change int // 0 不变, 1初始 2迁入, 3迁出
+		const (
+			NoChange = 0
+			NewShard = 1
+			MoveIn   = 2
+			MoveOut  = 3
+		)
 		for i := 0; i < len(newConfig.Shards); i++ {
 			if lastConfig.Shards[i] == kv.gid {
 				if newConfig.Shards[i] != kv.gid {
-					moveOut = append(moveOut, i)
+					change = MoveOut
+				} else {
+					change = NoChange
 				}
 			} else {
 				if newConfig.Shards[i] == kv.gid {
 					if lastConfig.Shards[i] == 0 {
-						newShard = append(newShard, i)
+						change = NewShard
 					} else {
-						moveIn = append(moveIn, i)
+						change = MoveIn
 					}
+				} else {
+					change = NoChange
 				}
 			}
-		}
-		for _, s := range newShard { //启动新shard的server
-			server := kv.shardServers[s]
+			server := kv.shardServers[i]
 			server.mu.Lock()
-			server.Status = 1
-			server.ConfigNum = newConfig.Num
-			server.Store = map[string]string{}
-			server.AppliedSeq = map[int64]int64{}
-			server.RepliedValue = map[int64]string{}
+			switch change {
+			case NewShard:
+				if server.Status != Idle {
+					panic("shard rewritten")
+				}
+				server.Status = Working
+				server.InConfigNum = newConfig.Num
+				server.Store = map[string]*string{}
+				server.AppliedSeq = map[int64]int64{}
+				server.RepliedValue = map[int64]*string{}
+				kv.logger.log("allocated a new shard %v", i)
+			case MoveIn:
+				if server.Status != Idle {
+					panic("shard rewritten")
+				}
+				server.Status = In
+				server.InConfigNum = newConfig.Num
+				kv.logger.log("need to move In shard %v", i)
+			case MoveOut:
+				target := newConfig.Shards[i]
+				outArgs := &InstallShardArgs{
+					Shard:        server.Shard,
+					Ends:         newConfig.Groups[target],
+					InConfigNum:  server.InConfigNum,
+					OutConfigNum: newConfig.Num,
+					Store:        server.Store,
+					AppliedSeq:   server.AppliedSeq,
+					RepliedValue: server.RepliedValue,
+				}
+				server.OutShards = append(server.OutShards, outArgs)
+				server.Store = nil
+				server.RepliedValue = nil
+				server.AppliedSeq = nil
+				if server.Status == Working {
+					outArgs.Status = Ready
+				} else if server.Status == In {
+					outArgs.Status = WaitData
+					outArgs.mu.Lock()
+				} else {
+					panic("Wrong Status")
+				}
+				server.Status = Idle
+				server.InConfigNum = 0
+				kv.logger.log("need to move out shard %v", i)
+			}
 			server.mu.Unlock()
 		}
-		kv.logger.log("start new shard server")
-		for _, s := range moveOut { // 标记为待迁出状态, 立即开始迁出, 不再处理之后的请求
-			server := kv.shardServers[s]
-			server.mu.Lock()
-			server.Status = 2
-			server.mu.Unlock()
-			go kv.moveShard(s, newConfig)
-		}
-		kv.logger.log("start moveOut shard")
-		for _, s := range moveIn {
-			server := kv.shardServers[s]
-			server.mu.Lock()
-			server.Status = 3
-			server.ConfigNum = newConfig.Num
-			server.mu.Unlock()
-		}
-		kv.logger.log("set moveIn shard")
-		kv.configs = append(kv.configs, newConfig)
-		kv.configNum++
 		kv.logger.log("updateConfig %v", newConfig)
 	} else {
 		kv.logger.log("expected configNum %v got %v", kv.configNum+1, newConfig.Num)
 	}
 }
 
-func (kv *ShardKV) moveShard(shard int, cfg shardctrler.Config) {
-	kv.smMu.RLock()
-	defer kv.smMu.RUnlock()
-	server := kv.shardServers[shard]
-	GID := cfg.Shards[shard]
-	ends := cfg.Groups[GID]
+// 拿到副本进行迁移
+func (kv *ShardKV) moveShard(args *InstallShardArgs) {
+	// 尝试获取锁,确保数据已就绪
+	args.mu.Lock()
+	args.mu.Unlock()
+	kv.logger.log("start to move shard %v(outConfigNum:%v) to %v", args.Shard, args.OutConfigNum, args.Ends)
 	receivers := []*labrpc.ClientEnd{}
-	for _, end := range ends {
+	for _, end := range args.Ends {
 		receivers = append(receivers, kv.make_end(end))
 	}
-	kv.logger.log("try lock move shard %v from %v to %v", shard, kv.gid, GID)
-	server.mu.RLock()
-	args := InstallShardArgs{
-		Shard:        server.Shard,
-		ConfigNum:    cfg.Num,
-		Store:        map[string]string{},
-		AppliedSeq:   map[int64]int64{},
-		RepliedValue: map[int64]string{},
-	}
-	for k, v := range server.Store {
-		args.Store[k] = v
-	}
-	for c, seq := range server.AppliedSeq {
-		args.AppliedSeq[c] = seq
-	}
-	for c, v := range server.RepliedValue {
-		args.RepliedValue[c] = v
-	}
-	server.mu.RUnlock()
-
-	finish := false
+	success := false
 out:
 	for kv.Killed() == 0 {
 		for r := 0; r < len(receivers); r++ {
 			reply := InstallShardReply{}
-			kv.logger.log("try send move shard %v from %v to %v", shard, kv.gid, GID)
-			ok := receivers[r].Call("ShardKV.InstallShard", &args, &reply)
-			kv.logger.log("have sent move shard %v from %v to %v", shard, kv.gid, GID)
+			ok := receivers[r].Call("ShardKV.InstallShard", args, &reply)
 			if ok && reply.Success {
-				finish = true
+				success = true
 				break out
 			}
 		}
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
-	server.mu.Lock()
-	if finish {
-		server.Store = map[string]string{}
-		server.AppliedSeq = map[int64]int64{}
-		server.RepliedValue = map[int64]string{}
-		server.Status = 0
-		kv.logger.log("move shard %v from %v to %v", shard, kv.gid, GID)
+	if success {
+		kv.rf.Start(Op{
+			OpType: RemoveShard,
+			Shard:  args.Shard,
+			Args:   args.OutConfigNum,
+		}) // 不必等待完成,大不了重发
+		kv.logger.log("success to move shard %v(outConfigNum:%v) to %v", args.Shard, args.OutConfigNum, args.Ends)
 	}
-	server.mu.Unlock()
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -511,6 +611,7 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 	atomic.StoreInt32(&kv.dead, 1)
+	kv.logger.log("killed")
 }
 func (kv *ShardKV) Killed() int32 {
 	return atomic.LoadInt32(&kv.dead)
@@ -574,6 +675,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		go kv.makeSnapshot()
 	}
 	return kv
+}
+
+func encodeLength(item interface{}) int {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(item)
+	return len(w.Bytes())
 }
 
 //func timingLock(lock *sync.Mutex) {

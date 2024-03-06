@@ -87,7 +87,8 @@ func makeLogger(owner string) *logger {
 	l := logger{
 		owner: owner,
 	}
-	f, err := os.Create(fmt.Sprintf("%v.log", owner))
+	os.Mkdir("logs", os.ModePerm)
+	f, err := os.Create(fmt.Sprintf("logs/%v.log", owner))
 	if err != nil {
 		panic("fail create log file")
 	}
@@ -97,7 +98,8 @@ func makeLogger(owner string) *logger {
 func (l *logger) log(format string, a ...interface{}) {
 	l.mu.Lock()
 	msg := fmt.Sprintf(format, a...)
-	_, err := fmt.Fprintf(l.output, msg)
+	fmt.Println(l.owner + "::" + msg)
+	_, err := fmt.Fprintln(l.output, msg)
 	if err != nil {
 		panic("log err")
 	}

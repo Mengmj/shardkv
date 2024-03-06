@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"6.5840/labrpc"
+	"fmt"
 	"sync"
 )
 import "crypto/rand"
@@ -131,6 +132,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					break
 				}
 				// ... not ok, or ErrWrongLeader
+				fmt.Sprintf("try another server")
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
