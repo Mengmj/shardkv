@@ -1,7 +1,6 @@
 package shardkv
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -87,21 +86,21 @@ func makeLogger(owner string) *logger {
 	l := logger{
 		owner: owner,
 	}
-	os.Mkdir("logs", os.ModePerm)
-	f, err := os.Create(fmt.Sprintf("logs/%v.log", owner))
-	if err != nil {
-		panic("fail create log file")
-	}
-	l.output = f
+	//os.Mkdir("logs", os.ModePerm)
+	//f, err := os.Create(fmt.Sprintf("logs/%v.log", owner))
+	//if err != nil {
+	//	panic("fail create log file")
+	//}
+	//l.output = f
 	return &l
 }
 func (l *logger) log(format string, a ...interface{}) {
-	l.mu.Lock()
-	msg := fmt.Sprintf(format, a...)
-	fmt.Println(l.owner + "::" + msg)
-	_, err := fmt.Fprintln(l.output, msg)
-	if err != nil {
-		panic("log err")
-	}
-	l.mu.Unlock()
+	//l.mu.Lock()
+	//msg := fmt.Sprintf(format, a...)
+	//fmt.Println(l.owner + "::" + msg)
+	//_, err := fmt.Fprintln(l.output, msg)
+	//if err != nil {
+	//	panic("log err")
+	//}
+	//l.mu.Unlock()
 }

@@ -90,7 +90,6 @@ func TestStaticShards5A(t *testing.T) {
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
 	fmt.Printf("  ... Passed\n")
 }
 
@@ -171,8 +170,10 @@ func TestRejection5A(t *testing.T) {
 	if ndone != n/2 {
 		t.Fatalf("expected %v completions; got %v\n", n/2, ndone)
 	}
-
 	fmt.Printf("  ... Passed\n")
+	for _, s := range ctl1.servers {
+		s.Kill()
+	}
 }
 
 func TestJoinLeave5B(t *testing.T) {

@@ -190,8 +190,8 @@ type ShardKV struct {
 	indexMu sync.RWMutex
 
 	shardServers [shardctrler.NShards]*KVServer
-	configNum    int                  // 最新的config版本号
-	configs      []shardctrler.Config // config的历史版本
+	configNum    int // 最新的config版本号
+	lastConfig   shardctrler.Config
 	appliedIndex int64
 }
 
@@ -214,7 +214,7 @@ func (kv *ShardKV) makeSnapshot() {
 			kv.logger.log("get lock to make snapshot")
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
-			if e.Encode(kv.configNum) != nil || e.Encode(kv.configs) != nil || e.Encode(kv.appliedIndex) != nil {
+			if e.Encode(kv.configNum) != nil || e.Encode(kv.lastConfig) != nil || e.Encode(kv.appliedIndex) != nil {
 				panic("encode error")
 			}
 			for i := 0; i < shardctrler.NShards; i++ {
@@ -243,7 +243,7 @@ func panicIfEncodeErr(e *labgob.LabEncoder, i interface{}) {
 	if e.Encode(i) != nil {
 		panic("encode error")
 	}
-	fmt.Printf("length is %v (%v)\n", encodeLength(i), i)
+	//fmt.Printf("length is %v (%v)\n", encodeLength(i), i)
 }
 
 func panicIfDecodeErr(d *labgob.LabDecoder, i interface{}) {
@@ -445,7 +445,7 @@ func (kv *ShardKV) consume() {
 				kv.shardServers[i].mu.Lock()
 			}
 			panicIfDecodeErr(d, &kv.configNum)
-			panicIfDecodeErr(d, &kv.configs)
+			panicIfDecodeErr(d, &kv.lastConfig)
 			panicIfDecodeErr(d, &kv.appliedIndex)
 			for i := 0; i < shardctrler.NShards; i++ {
 				server := kv.shardServers[i]
@@ -487,8 +487,8 @@ func (kv *ShardKV) updateConfig(newConfig shardctrler.Config) {
 	kv.cfgMu.Lock()
 	defer kv.cfgMu.Unlock()
 	if newConfig.Num == kv.configNum+1 { // 只接受连续的版本
-		lastConfig := kv.configs[len(kv.configs)-1]
-		kv.configs = append(kv.configs, newConfig)
+		lastConfig := kv.lastConfig
+		kv.lastConfig = newConfig
 		kv.configNum++
 		var change int // 0 不变, 1初始 2迁入, 3迁出
 		const (
@@ -664,7 +664,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.ctlClerk = shardctrler.MakeClerk(ctrlers)
-	kv.configs = []shardctrler.Config{{}}
+	kv.lastConfig = shardctrler.Config{}
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.shardServers[i] = MakeKVServer(gid, me, i)
 	}

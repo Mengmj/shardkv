@@ -1,6 +1,8 @@
 package shardctrler
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+)
 import "6.5840/raft"
 import "testing"
 import "os"
@@ -61,6 +63,8 @@ func (cfg *config) cleanup() {
 	}
 	cfg.net.Cleanup()
 	cfg.checkTimeout()
+	//time.Sleep(time.Duration(5) * time.Second)
+	//fmt.Println("check")
 }
 
 // Maximum log size across all servers

@@ -2,6 +2,7 @@ package shardctrler
 
 import (
 	"6.5840/raft"
+	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -116,9 +117,6 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 
 func (sc *ShardCtrler) serverApply() {
 	for msg := range sc.applyCh {
-		if sc.Killed() {
-			return
-		}
 		sc.smMu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
@@ -281,10 +279,12 @@ func (sc *ShardCtrler) Kill() {
 	sc.rf.Kill()
 	// Your code here, if desired.
 	atomic.StoreInt32(&sc.dead, 1)
+	fmt.Println("shardctrler killed")
 }
 
 func (sc *ShardCtrler) Killed() bool {
-	return atomic.LoadInt32(&sc.dead) == 1
+	z := atomic.LoadInt32(&sc.dead)
+	return z == 1
 }
 
 // needed by shardkv tester

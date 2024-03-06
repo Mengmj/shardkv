@@ -397,7 +397,7 @@ func (rf *Raft) runElection(electingTerm int64) {
 	rf.persist()
 	rf.mu.Unlock()
 
-	replyChan := make(chan *RequestVoteReply)
+	replyChan := make(chan *RequestVoteReply, rf.n)
 	for i := 0; i < rf.n; i++ {
 		if i != rf.me {
 			go func(p int) {
@@ -719,14 +719,11 @@ func (rf *Raft) apply() {
 			rf.applyCh <- msg
 			FPrintf("apply", "server %v commit %v\n", rf.me, msg)
 		}
-		if rf.killed() {
-			close(rf.applyCh)
-			return
-		}
 		endTime := time.Now().UnixMilli()
 		mms := max(0, 100-(endTime-startTime))
 		time.Sleep(time.Duration(mms) * time.Microsecond)
 	}
+	close(rf.applyCh)
 
 }
 
@@ -883,7 +880,7 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) leaderTerm() int64 {
 	term := int64(-1)
 	rf.mu.Lock()
-	if rf.dead == 0 && rf.leaderId == rf.me {
+	if !rf.killed() && rf.leaderId == rf.me {
 		term = rf.currentTerm
 	}
 	rf.mu.Unlock()

@@ -91,6 +91,8 @@ func (cfg *config) cleanup() {
 	}
 	cfg.net.Cleanup()
 	cfg.checkTimeout()
+	time.Sleep(time.Duration(5) * time.Second)
+	fmt.Printf("check")
 }
 
 // check that no server's log is too big.
